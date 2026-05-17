@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-job-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-job
+  template:
+    metadata:
+      labels:
+        app: ai-job
+    spec:
+      containers:
+      - name: ai-job-container
+        image: ai-job
+        imagePullPolicy: Never
+        # --- HERE IS THE FIX! ---
+        resources:
+          limits:
+            # We limit this container to only 50% of one CPU core
+            cpu: "500m"

@@ -1,0 +1,40 @@
+# This is the "Deployment" - it runs your app
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-service-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web-service
+  template:
+    metadata:
+      labels:
+        app: web-service
+    spec:
+      containers:
+      - name: web-service-container
+        image: web-service
+        # This is KEY: It tells Kubernetes to use your 
+        # local image, not one from the internet
+        imagePullPolicy: Never
+---
+# This is the "Service" - it lets you access the app
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-service-service
+spec:
+  # This makes it accessible from your browser
+  type: NodePort
+  selector:
+    app: web-service
+  ports:
+  - protocol: TCP
+    # The port on the service
+    port: 80
+    # The port your app is listening on (from app.py)
+    targetPort: 5000
+    # The port you will use in your browser (localhost:30001)
+    nodePort: 30001
