@@ -1,8 +1,18 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 
 // ─── API config ───────────────────────────────────────────────────────────────
-// Switch this to your Railway/Render URL once deployed
 const API_BASE = import.meta.env.VITE_API_URL || null;
+
+// ─── Responsive hook ──────────────────────────────────────────────────────────
+function useWidth() {
+  const [w, setW] = useState(window.innerWidth);
+  useEffect(() => {
+    const handler = () => setW(window.innerWidth);
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, []);
+  return w;
+}
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
 const DEFAULT_NODES = [
@@ -15,7 +25,7 @@ const STRATEGIES = [
   {
     id: "least-loaded",
     label: "Least-Loaded",
-    accent: "#c084fc",   // violet
+    accent: "#c084fc",
     glow: "#c084fc44",
     icon: "⟺",
     desc: "Spreads jobs across all nodes evenly. Picks the node with most free CPU.",
@@ -24,7 +34,7 @@ const STRATEGIES = [
   {
     id: "binpack",
     label: "Binpack",
-    accent: "#f472b6",   // pink
+    accent: "#f472b6",
     glow: "#f472b644",
     icon: "⊞",
     desc: "Fills a node before moving to the next. Minimises active nodes.",
@@ -33,7 +43,7 @@ const STRATEGIES = [
   {
     id: "network-aware",
     label: "Network-Aware",
-    accent: "#38bdf8",   // cyan
+    accent: "#38bdf8",
     glow: "#38bdf844",
     icon: "⌁",
     desc: "Scores nodes by CPU free + latency. Favours low-latency nodes.",
@@ -42,16 +52,12 @@ const STRATEGIES = [
 ];
 
 const BENCHMARK = {
-  unlimited:    { cores: 3820, throughput: 47.3, latency: 210  },
-  limited_500m: { cores: 487,  throughput: 5.9,  latency: 1840 },
-  limited_1000m:{ cores: 971,  throughput: 12.1, latency: 950  },
+  unlimited:     { cores: 3820, throughput: 47.3, latency: 210  },
+  limited_500m:  { cores: 487,  throughput: 5.9,  latency: 1840 },
+  limited_1000m: { cores: 971,  throughput: 12.1, latency: 950  },
 };
 
 // ─── Scheduling logic (client-side fallback) ──────────────────────────────────
-function initNodes() {
-  return DEFAULT_NODES.map(n => ({ ...n, used_cpu: 0, used_ram: 0, jobs: [] }));
-}
-
 function computeBalance(nodes) {
   const utils = nodes.map(n => n.used_cpu / n.total_cpu);
   const mean = utils.reduce((s, u) => s + u, 0) / utils.length;
@@ -95,8 +101,7 @@ function runSchedulerLocal(strategy, jobs, nodeConfigs) {
   const balance = computeBalance(nodes);
 
   return {
-    strategy,
-    assignments,
+    strategy, assignments,
     nodes: nodes.map(n => ({
       ...n,
       cpu_pct: Math.round((n.used_cpu / n.total_cpu) * 100),
@@ -121,7 +126,7 @@ function makeDefaultJobs() {
   }));
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Design tokens ────────────────────────────────────────────────────────────
 const C = {
   bg:      "#07070f",
   surface: "#0d0d1a",
@@ -138,33 +143,7 @@ const C = {
   red:     "#f87171",
 };
 
-const css = {
-  page: {
-    minHeight: "100vh",
-    background: C.bg,
-    color: C.text,
-    fontFamily: "'DM Mono', 'Fira Code', 'Cascadia Code', monospace",
-    padding: "0 0 60px",
-  },
-  hero: {
-    background: `linear-gradient(180deg, #0a0a1e 0%, ${C.bg} 100%)`,
-    borderBottom: `1px solid ${C.border}`,
-    padding: "40px 24px 32px",
-    textAlign: "center",
-    position: "relative",
-    overflow: "hidden",
-  },
-  container: { maxWidth: 860, margin: "0 auto", padding: "0 20px" },
-  card: {
-    background: C.card,
-    border: `1px solid ${C.border}`,
-    borderRadius: 12,
-    padding: "18px 20px",
-  },
-};
-
 // ─── Sub-components ───────────────────────────────────────────────────────────
-
 function GlowOrb({ color, x, y, size = 300 }) {
   return (
     <div style={{
@@ -198,19 +177,15 @@ function Pill({ label, value, color }) {
       background: C.surface, border: `1px solid ${C.border}`,
       borderRadius: 8, padding: "10px 14px",
     }}>
-      <span style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
-      <span style={{ fontSize: 20, fontWeight: 700, color: color || C.text }}>{value}</span>
+      <span style={{ fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+      <span style={{ fontSize: 18, fontWeight: 700, color: color || C.text }}>{value}</span>
     </div>
   );
 }
 
 function Bar({ pct, color, animated = true }) {
   return (
-    <div style={{
-      height: 6, borderRadius: 99,
-      background: `${C.border}`,
-      overflow: "hidden",
-    }}>
+    <div style={{ height: 6, borderRadius: 99, background: C.border, overflow: "hidden" }}>
       <div style={{
         width: `${pct}%`, height: "100%", borderRadius: 99,
         background: pct > 85 ? C.red : color,
@@ -225,8 +200,9 @@ function NodeCard({ node, highlighted, accentColor }) {
   const glow = highlighted ? `0 0 20px ${accentColor}44, 0 0 40px ${accentColor}22` : "none";
   return (
     <div style={{
-      ...css.card,
+      background: C.card,
       border: `1px solid ${highlighted ? accentColor : C.border}`,
+      borderRadius: 12, padding: "16px 18px",
       boxShadow: glow,
       transition: "all 0.35s cubic-bezier(0.4,0,0.2,1)",
     }}>
@@ -279,6 +255,7 @@ function StrategyCard({ s, selected, onClick }) {
       cursor: "pointer", textAlign: "left",
       transition: "all 0.25s",
       boxShadow: selected ? `0 0 20px ${s.glow}` : "none",
+      width: "100%",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <span style={{ fontSize: 18, color: s.accent }}>{s.icon}</span>
@@ -301,6 +278,7 @@ function NeonButton({ onClick, disabled, children, color = C.violet, outline = f
       transition: "all 0.2s",
       boxShadow: disabled ? "none" : `0 0 12px ${color}33`,
       letterSpacing: "0.03em",
+      whiteSpace: "nowrap",
     }}>
       {children}
     </button>
@@ -308,7 +286,7 @@ function NeonButton({ onClick, disabled, children, color = C.violet, outline = f
 }
 
 // ─── Job configurator ─────────────────────────────────────────────────────────
-function JobConfigurator({ jobs, onJobsChange }) {
+function JobConfigurator({ jobs, onJobsChange, isMobile }) {
   const addJob = () => {
     const id = `job-${jobs.length + 1}`;
     onJobsChange([...jobs, { id, label: id, cpu: 1, ram: 2 }]);
@@ -321,36 +299,46 @@ function JobConfigurator({ jobs, onJobsChange }) {
   };
 
   return (
-    <div style={{ ...css.card, marginBottom: 16 }}>
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "18px 20px", marginBottom: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: C.violet }}>Job queue <span style={{ color: C.muted, fontWeight: 400 }}>({jobs.length} jobs)</span></span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.violet }}>
+          Job queue <span style={{ color: C.muted, fontWeight: 400 }}>({jobs.length} jobs)</span>
+        </span>
         <NeonButton onClick={addJob} color={C.green} outline>+ Add job</NeonButton>
       </div>
       <div style={{ display: "grid", gap: 6, maxHeight: 240, overflowY: "auto" }}>
         {jobs.map((job, i) => (
           <div key={job.id} style={{
-            display: "grid", gridTemplateColumns: "1fr 80px 80px auto",
+            display: "grid",
+            gridTemplateColumns: isMobile ? "1fr auto" : "1fr 80px 80px auto",
             gap: 8, alignItems: "center",
             padding: "8px 10px", borderRadius: 8,
             background: C.surface, border: `1px solid ${C.border}`,
           }}>
             <span style={{ fontSize: 12, color: C.text }}>{job.label}</span>
-            <div>
-              <label style={{ fontSize: 10, color: C.muted, display: "block", marginBottom: 2 }}>CPU cores</label>
-              <input
-                type="number" min="0.5" max="8" step="0.5" value={job.cpu}
-                onChange={e => update(i, "cpu", e.target.value)}
-                style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.cyan, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }}
-              />
-            </div>
-            <div>
-              <label style={{ fontSize: 10, color: C.muted, display: "block", marginBottom: 2 }}>RAM GB</label>
-              <input
-                type="number" min="1" max="32" step="1" value={job.ram}
-                onChange={e => update(i, "ram", e.target.value)}
-                style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.pink, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }}
-              />
-            </div>
+            {!isMobile && (
+              <>
+                <div>
+                  <label style={{ fontSize: 10, color: C.muted, display: "block", marginBottom: 2 }}>CPU cores</label>
+                  <input
+                    type="number" min="0.5" max="8" step="0.5" value={job.cpu}
+                    onChange={e => update(i, "cpu", e.target.value)}
+                    style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.cyan, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: C.muted, display: "block", marginBottom: 2 }}>RAM GB</label>
+                  <input
+                    type="number" min="1" max="32" step="1" value={job.ram}
+                    onChange={e => update(i, "ram", e.target.value)}
+                    style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.pink, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }}
+                  />
+                </div>
+              </>
+            )}
+            {isMobile && (
+              <span style={{ fontSize: 11, color: C.muted }}>{job.cpu} CPU · {job.ram}GB</span>
+            )}
             <button onClick={() => removeJob(i)} style={{
               background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16, padding: "0 4px",
             }}>×</button>
@@ -362,7 +350,7 @@ function JobConfigurator({ jobs, onJobsChange }) {
 }
 
 // ─── Benchmark section ────────────────────────────────────────────────────────
-function BenchmarkSection() {
+function BenchmarkSection({ cols }) {
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
@@ -371,36 +359,36 @@ function BenchmarkSection() {
         </p>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: 12, marginBottom: 20 }}>
         {[
           { label: "Unlimited", data: BENCHMARK.unlimited, color: C.green, tag: "No limits" },
           { label: "1 core limit", data: BENCHMARK.limited_1000m, color: C.cyan, tag: "1000m CPU cap" },
           { label: "500m limit", data: BENCHMARK.limited_500m, color: C.red, tag: "500m CPU cap" },
         ].map(({ label, data, color, tag }) => (
-          <div key={label} style={{ ...css.card, border: `1px solid ${color}44` }}>
+          <div key={label} style={{ background: C.card, border: `1px solid ${color}44`, borderRadius: 12, padding: "18px 20px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
               <span style={{ fontWeight: 700, fontSize: 13, color }}>{label}</span>
               <Tag color={color}>{tag}</Tag>
             </div>
-            <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "grid", gap: 10 }}>
               <div>
                 <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>CPU usage</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color }}>{data.cores}m</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color }}>{data.cores}m</div>
               </div>
               <div>
                 <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>Throughput (SVD/s)</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color }}>{data.throughput}</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color }}>{data.throughput}</div>
               </div>
               <div>
                 <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>p99 Latency</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color }}>{data.latency}ms</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color }}>{data.latency}ms</div>
               </div>
             </div>
           </div>
         ))}
       </div>
 
-      <div style={{ ...css.card, border: `1px solid ${C.violet}44`, background: `${C.violet}08` }}>
+      <div style={{ background: C.card, border: `1px solid ${C.violet}44`, borderRadius: 12, padding: "18px 20px", background: `${C.violet}08` }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: C.violet, marginBottom: 8 }}>Key insight</div>
         <p style={{ fontSize: 13, color: C.muted, margin: 0, lineHeight: 1.7 }}>
           Capping at <span style={{ color: C.red }}>500m CPU</span> via Kubernetes resource limits reduced throughput by{" "}
@@ -414,12 +402,17 @@ function BenchmarkSection() {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
+  const width = useWidth();
+  const isMobile = width < 640;
+  const isTablet = width >= 640 && width < 900;
+  const cols3 = isMobile ? 1 : 3;
+  const cols2 = isMobile ? 1 : 2;
+
   const [tab, setTab] = useState("sim");
   const [strategy, setStrategy] = useState("least-loaded");
   const [jobs, setJobs] = useState(makeDefaultJobs());
   const [showJobConfig, setShowJobConfig] = useState(false);
-
-  const [step, setStep]     = useState(0);
+  const [step, setStep] = useState(0);
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [compareData, setCompareData] = useState(null);
@@ -428,7 +421,6 @@ export default function App() {
   const timerRef = useRef(null);
   const strat = STRATEGIES.find(s => s.id === strategy);
 
-  // Check if API is reachable
   useEffect(() => {
     if (!API_BASE) return;
     fetch(`${API_BASE}/health`).then(r => r.ok && setApiOnline(true)).catch(() => {});
@@ -469,13 +461,10 @@ export default function App() {
   }
 
   async function runCompare() {
-    const results = await Promise.all(
-      STRATEGIES.map(s => fetchSchedule(s.id, jobs))
-    );
+    const results = await Promise.all(STRATEGIES.map(s => fetchSchedule(s.id, jobs)));
     setCompareData(results);
   }
 
-  // Build displayed state from step
   const fullResult = result || runSchedulerLocal(strategy, jobs, DEFAULT_NODES);
   const shownAssignments = fullResult.assignments.slice(0, step);
 
@@ -498,50 +487,85 @@ export default function App() {
   const lastAssigned = shownAssignments.at(-1);
   const done = result && step >= result.assignments.length;
 
+  const containerStyle = {
+    maxWidth: 1200,
+    margin: "0 auto",
+    padding: isMobile ? "0 16px" : "0 32px",
+  };
+
+  const TABS = [
+    { id: "sim",       label: isMobile ? "Sim" : "Simulator" },
+    { id: "compare",   label: "Compare" },
+    { id: "benchmark", label: isMobile ? "K8s" : "K8s Benchmarks" },
+    { id: "about",     label: isMobile ? "Info" : "How it works" },
+  ];
+
   return (
-    <div style={css.page}>
+    <div style={{
+      minHeight: "100vh",
+      background: C.bg,
+      color: C.text,
+      fontFamily: "'DM Mono', 'Fira Code', 'Cascadia Code', monospace",
+      paddingBottom: 60,
+      width: "100%",
+      overflowX: "hidden",
+    }}>
+
       {/* ── Hero ── */}
-      <header style={css.hero}>
-        <GlowOrb color={C.violet} x="20%" y="50%" size={400} />
-        <GlowOrb color={C.pink}   x="80%" y="50%" size={300} />
-        <GlowOrb color={C.cyan}   x="50%" y="100%" size={200} />
+      <header style={{
+        background: `linear-gradient(180deg, #0a0a1e 0%, ${C.bg} 100%)`,
+        borderBottom: `1px solid ${C.border}`,
+        padding: isMobile ? "32px 16px 28px" : "56px 32px 44px",
+        textAlign: "center",
+        position: "relative",
+        overflow: "hidden",
+        width: "100%",
+      }}>
+        <GlowOrb color={C.violet} x="20%" y="50%" size={isMobile ? 200 : 500} />
+        <GlowOrb color={C.pink}   x="80%" y="50%" size={isMobile ? 150 : 400} />
+        <GlowOrb color={C.cyan}   x="50%" y="100%" size={isMobile ? 120 : 250} />
 
         <div style={{ position: "relative", zIndex: 1 }}>
-          <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "center", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
             <Tag color={C.violet}>VIT VELLORE · OS CASE STUDY</Tag>
             <Tag color={apiOnline ? C.green : C.muted}>{apiOnline ? "API ONLINE" : "OFFLINE MODE"}</Tag>
           </div>
           <h1 style={{
-            fontSize: "clamp(24px, 5vw, 42px)", fontWeight: 800,
-            margin: "0 0 10px",
+            fontSize: isMobile ? "28px" : isTablet ? "40px" : "56px",
+            fontWeight: 800,
+            margin: "0 0 14px",
+            lineHeight: 1.1,
             background: `linear-gradient(135deg, ${C.violet} 0%, ${C.pink} 50%, ${C.cyan} 100%)`,
-            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+            backgroundClip: "text",
             letterSpacing: "-0.02em",
+            padding: "0 8px",
           }}>
             Kubernetes Scheduling Simulator
           </h1>
-          <p style={{ fontSize: 15, color: C.muted, margin: 0 }}>
+          <p style={{ fontSize: isMobile ? 13 : 15, color: C.muted, margin: 0 }}>
             3 nodes · {jobs.length} jobs · 3 real strategies · cgroup benchmarks
           </p>
         </div>
       </header>
 
       {/* ── Tabs ── */}
-      <div style={{ borderBottom: `1px solid ${C.border}`, background: C.surface }}>
-        <div style={{ ...css.container, display: "flex", gap: 0 }}>
-          {[
-            { id: "sim",       label: "Simulator" },
-            { id: "compare",   label: "Compare" },
-            { id: "benchmark", label: "K8s Benchmarks" },
-            { id: "about",     label: "How it works" },
-          ].map(t => (
+      <div style={{ borderBottom: `1px solid ${C.border}`, background: C.surface, width: "100%" }}>
+        <div style={{ ...containerStyle, display: "flex", gap: 0, overflowX: "auto" }}>
+          {TABS.map(t => (
             <button key={t.id} onClick={() => setTab(t.id)} style={{
-              padding: "14px 20px", border: "none", background: "none",
-              cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600,
+              padding: isMobile ? "12px 14px" : "14px 24px",
+              border: "none", background: "none",
+              cursor: "pointer", fontFamily: "inherit",
+              fontSize: isMobile ? 12 : 13,
+              fontWeight: 600,
               color: tab === t.id ? strat.accent : C.muted,
               borderBottom: `2px solid ${tab === t.id ? strat.accent : "transparent"}`,
               transition: "all 0.2s",
               letterSpacing: "0.02em",
+              whiteSpace: "nowrap",
+              flexShrink: 0,
             }}>
               {t.label}
             </button>
@@ -549,16 +573,20 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ ...css.container, paddingTop: 28 }}>
+      {/* ── Content ── */}
+      <div style={{ ...containerStyle, paddingTop: 28 }}>
 
         {/* ══ SIMULATOR TAB ══ */}
         {tab === "sim" && (
           <div>
             {/* Strategy selector */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}>
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${cols3}, 1fr)`,
+              gap: 10, marginBottom: 16,
+            }}>
               {STRATEGIES.map(s => (
-                <StrategyCard
-                  key={s.id} s={s}
+                <StrategyCard key={s.id} s={s}
                   selected={strategy === s.id}
                   onClick={() => { setStrategy(s.id); reset(); }}
                 />
@@ -566,7 +594,7 @@ export default function App() {
             </div>
 
             {/* Job config toggle */}
-            <div style={{ marginBottom: 14 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14, alignItems: "center" }}>
               <button
                 onClick={() => setShowJobConfig(v => !v)}
                 style={{
@@ -586,7 +614,11 @@ export default function App() {
               </button>
             </div>
 
-            {showJobConfig && <JobConfigurator jobs={jobs} onJobsChange={j => { setJobs(j); reset(); }} />}
+            {showJobConfig && (
+              <JobConfigurator jobs={jobs} isMobile={isMobile}
+                onJobsChange={j => { setJobs(j); reset(); }}
+              />
+            )}
 
             {/* Action buttons */}
             <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
@@ -600,10 +632,13 @@ export default function App() {
             </div>
 
             {/* Node grid */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${cols3}, 1fr)`,
+              gap: 12, marginBottom: 20,
+            }}>
               {displayedNodes.map(n => (
-                <NodeCard
-                  key={n.id} node={n}
+                <NodeCard key={n.id} node={n}
                   highlighted={lastAssigned?.node_id === n.id}
                   accentColor={strat.accent}
                 />
@@ -612,7 +647,7 @@ export default function App() {
 
             {/* Log + metrics */}
             {step > 0 && (
-              <div style={css.card}>
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "18px 20px" }}>
                 <div style={{ fontSize: 12, color: strat.accent, fontWeight: 700, marginBottom: 10, letterSpacing: "0.06em" }}>
                   ASSIGNMENT LOG
                 </div>
@@ -627,7 +662,11 @@ export default function App() {
                 </div>
 
                 {done && (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginTop: 16 }}>
+                  <div style={{
+                    display: "grid",
+                    gridTemplateColumns: `repeat(${isMobile ? 2 : 4}, 1fr)`,
+                    gap: 10, marginTop: 16,
+                  }}>
                     <Pill label="Avg Latency" value={`${fullResult.avg_latency_ms}ms`} color={strat.accent} />
                     <Pill label="Jobs Placed" value={`${fullResult.jobs_placed}/${fullResult.jobs_total}`} color={C.green} />
                     <Pill label="Balance" value={`${fullResult.balance_pct}%`} color={C.pink} />
@@ -651,7 +690,11 @@ export default function App() {
               </div>
             ) : (
               <div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: `repeat(${cols3}, 1fr)`,
+                  gap: 12, marginBottom: 20,
+                }}>
                   {compareData.map((r, i) => {
                     const s = STRATEGIES[i];
                     const bestLatency = compareData.reduce((best, x) => x.avg_latency_ms < best.avg_latency_ms ? x : best, compareData[0]);
@@ -661,8 +704,9 @@ export default function App() {
 
                     return (
                       <div key={s.id} style={{
-                        ...css.card,
+                        background: C.card,
                         border: `1.5px solid ${s.accent}`,
+                        borderRadius: 12, padding: "18px 20px",
                         boxShadow: `0 0 24px ${s.glow}`,
                       }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
@@ -709,7 +753,7 @@ export default function App() {
                   })}
                 </div>
 
-                <div style={{ ...css.card, border: `1px solid ${C.violet}44`, background: `${C.violet}08` }}>
+                <div style={{ background: `${C.violet}08`, border: `1px solid ${C.violet}44`, borderRadius: 12, padding: "18px 20px" }}>
                   <div style={{ fontSize: 12, fontWeight: 700, color: C.violet, marginBottom: 8 }}>Key insight</div>
                   <p style={{ fontSize: 13, color: C.muted, margin: 0, lineHeight: 1.7 }}>
                     <span style={{ color: C.cyan }}>Network-Aware</span> achieves lowest latency by routing jobs to Node A (10ms).{" "}
@@ -723,12 +767,12 @@ export default function App() {
         )}
 
         {/* ══ BENCHMARK TAB ══ */}
-        {tab === "benchmark" && <BenchmarkSection />}
+        {tab === "benchmark" && <BenchmarkSection cols={cols3} />}
 
         {/* ══ ABOUT TAB ══ */}
         {tab === "about" && (
-          <div style={{ maxWidth: 640 }}>
-            <div style={{ ...css.card, marginBottom: 14 }}>
+          <div style={{ maxWidth: 720 }}>
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "18px 20px", marginBottom: 14 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: C.violet, letterSpacing: "0.06em", marginBottom: 10 }}>WHAT THIS DEMONSTRATES</div>
               <p style={{ fontSize: 14, color: C.muted, lineHeight: 1.7, margin: 0 }}>
                 A full-stack OS scheduling case study: a FastAPI backend exposes a <span style={{ color: C.cyan }}>/schedule</span> API that runs real scheduling logic server-side, a React frontend calls it and animates job placement, and real Kubernetes cgroup benchmark data shows what OS-level resource isolation actually does to performance.
@@ -736,8 +780,8 @@ export default function App() {
             </div>
 
             {STRATEGIES.map(s => (
-              <div key={s.id} style={{ ...css.card, borderLeft: `3px solid ${s.accent}`, marginBottom: 10 }}>
-                <div style={{ display: "flex", align: "center", gap: 8, marginBottom: 8 }}>
+              <div key={s.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderLeft: `3px solid ${s.accent}`, borderRadius: 12, padding: "18px 20px", marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
                   <span style={{ fontSize: 16 }}>{s.icon}</span>
                   <span style={{ fontWeight: 700, color: s.accent }}>{s.label}</span>
                 </div>
@@ -746,10 +790,10 @@ export default function App() {
               </div>
             ))}
 
-            <div style={{ ...css.card, marginTop: 14 }}>
+            <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "18px 20px", marginTop: 14 }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: C.cyan, letterSpacing: "0.06em", marginBottom: 10 }}>TECH STACK</div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {["React + Vite", "FastAPI (Python)", "Railway/Render", "Kubernetes", "Docker", "Linux cgroups", "Vercel"].map(t => (
+                {["React + Vite", "FastAPI (Python)", "Railway", "Kubernetes", "Docker", "Linux cgroups", "Vercel"].map(t => (
                   <Tag key={t} color={C.cyan}>{t}</Tag>
                 ))}
               </div>
