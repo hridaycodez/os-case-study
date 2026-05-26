@@ -1,329 +1,763 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
-const NODES = [
-  { id: "node-a", label: "Node A", totalCPU: 8, totalRAM: 16, latency: 10 },
-  { id: "node-b", label: "Node B", totalCPU: 8, totalRAM: 16, latency: 35 },
-  { id: "node-c", label: "Node C", totalCPU: 4, totalRAM: 8,  latency: 60 },
+// ─── API config ───────────────────────────────────────────────────────────────
+// Switch this to your Railway/Render URL once deployed
+const API_BASE = import.meta.env.VITE_API_URL || null;
+
+// ─── Data ─────────────────────────────────────────────────────────────────────
+const DEFAULT_NODES = [
+  { id: "node-a", label: "Node A", total_cpu: 8,  total_ram: 16, latency_ms: 10 },
+  { id: "node-b", label: "Node B", total_cpu: 8,  total_ram: 16, latency_ms: 35 },
+  { id: "node-c", label: "Node C", total_cpu: 4,  total_ram: 8,  latency_ms: 60 },
 ];
 
-const JOBS = Array.from({ length: 12 }, (_, i) => ({
-  id: `job-${i + 1}`,
-  label: `Job ${i + 1}`,
-  cpu: [0.5, 1, 1.5, 2][i % 4],
-  ram: [1, 2, 1, 3][i % 4],
-}));
+const STRATEGIES = [
+  {
+    id: "least-loaded",
+    label: "Least-Loaded",
+    accent: "#c084fc",   // violet
+    glow: "#c084fc44",
+    icon: "⟺",
+    desc: "Spreads jobs across all nodes evenly. Picks the node with most free CPU.",
+    tradeoff: "Best balance, ignores latency entirely."
+  },
+  {
+    id: "binpack",
+    label: "Binpack",
+    accent: "#f472b6",   // pink
+    glow: "#f472b644",
+    icon: "⊞",
+    desc: "Fills a node before moving to the next. Minimises active nodes.",
+    tradeoff: "Saves power, creates hotspots under load."
+  },
+  {
+    id: "network-aware",
+    label: "Network-Aware",
+    accent: "#38bdf8",   // cyan
+    glow: "#38bdf844",
+    icon: "⌁",
+    desc: "Scores nodes by CPU free + latency. Favours low-latency nodes.",
+    tradeoff: "Lowest latency, can over-load fast nodes."
+  },
+];
 
+const BENCHMARK = {
+  unlimited:    { cores: 3820, throughput: 47.3, latency: 210  },
+  limited_500m: { cores: 487,  throughput: 5.9,  latency: 1840 },
+  limited_1000m:{ cores: 971,  throughput: 12.1, latency: 950  },
+};
+
+// ─── Scheduling logic (client-side fallback) ──────────────────────────────────
 function initNodes() {
-  return NODES.map(n => ({ ...n, usedCPU: 0, usedRAM: 0, jobs: [] }));
+  return DEFAULT_NODES.map(n => ({ ...n, used_cpu: 0, used_ram: 0, jobs: [] }));
 }
 
-function runScheduler(strategy) {
-  const nodes = initNodes();
+function computeBalance(nodes) {
+  const utils = nodes.map(n => n.used_cpu / n.total_cpu);
+  const mean = utils.reduce((s, u) => s + u, 0) / utils.length;
+  const variance = utils.reduce((s, u) => s + (u - mean) ** 2, 0) / utils.length;
+  const std = Math.sqrt(variance);
+  return { std: parseFloat(std.toFixed(4)), pct: Math.max(0, Math.round((1 - std) * 100)) };
+}
+
+function runSchedulerLocal(strategy, jobs, nodeConfigs) {
+  const nodes = nodeConfigs.map(n => ({ ...n, used_cpu: 0, used_ram: 0, jobs: [] }));
   const assignments = [];
   const log = [];
 
-  for (const job of JOBS) {
-    let chosen = null;
+  for (const job of jobs) {
+    const available = nodes.filter(
+      n => n.used_cpu + job.cpu <= n.total_cpu && n.used_ram + job.ram <= n.total_ram
+    );
+    if (!available.length) { log.push(`${job.label} → UNSCHEDULED`); continue; }
 
+    let chosen;
     if (strategy === "least-loaded") {
-      chosen = nodes
-        .filter(n => n.usedCPU + job.cpu <= n.totalCPU && n.usedRAM + job.ram <= n.totalRAM)
-        .sort((a, b) => (a.usedCPU / a.totalCPU) - (b.usedCPU / b.totalCPU))[0];
+      chosen = available.sort((a, b) => a.used_cpu / a.total_cpu - b.used_cpu / b.total_cpu)[0];
     } else if (strategy === "binpack") {
-      chosen = nodes
-        .filter(n => n.usedCPU + job.cpu <= n.totalCPU && n.usedRAM + job.ram <= n.totalRAM)
-        .sort((a, b) => (b.usedCPU / b.totalCPU) - (a.usedCPU / a.totalCPU))[0];
-    } else if (strategy === "network-aware") {
-      chosen = nodes
-        .filter(n => n.usedCPU + job.cpu <= n.totalCPU && n.usedRAM + job.ram <= n.totalRAM)
-        .sort((a, b) => {
-          const scoreA = 0.6 * (1 - a.usedCPU / a.totalCPU) + 0.4 * (1 / a.latency);
-          const scoreB = 0.6 * (1 - b.usedCPU / b.totalCPU) + 0.4 * (1 / b.latency);
-          return scoreB - scoreA;
-        })[0];
+      chosen = available.sort((a, b) => b.used_cpu / b.total_cpu - a.used_cpu / a.total_cpu)[0];
+    } else {
+      chosen = available.sort((a, b) => {
+        const sc = n => 0.6 * (1 - n.used_cpu / n.total_cpu) + 0.4 * (1 / n.latency_ms);
+        return sc(b) - sc(a);
+      })[0];
     }
-
-    if (chosen) {
-      chosen.usedCPU += job.cpu;
-      chosen.usedRAM += job.ram;
-      chosen.jobs.push(job.id);
-      assignments.push({ jobId: job.id, nodeId: chosen.id });
-      log.push(`${job.label} → ${chosen.label}`);
-    }
+    chosen.used_cpu += job.cpu;
+    chosen.used_ram += job.ram;
+    chosen.jobs.push(job.id);
+    assignments.push({ job_id: job.id, node_id: chosen.id, node_label: chosen.label, latency_ms: chosen.latency_ms });
+    log.push(`${job.label} → ${chosen.label}`);
   }
 
-  const avgLatency = assignments.reduce((sum, a) => {
-    const node = NODES.find(n => n.id === a.nodeId);
-    return sum + node.latency;
-  }, 0) / assignments.length;
+  const avgLatency = assignments.length
+    ? assignments.reduce((s, a) => s + a.latency_ms, 0) / assignments.length
+    : 0;
+  const balance = computeBalance(nodes);
 
-  const maxUtil = Math.max(...nodes.map(n => n.usedCPU / n.totalCPU));
-  const balance = 1 - maxUtil;
-
-  return { nodes, assignments, log, avgLatency, balance };
+  return {
+    strategy,
+    assignments,
+    nodes: nodes.map(n => ({
+      ...n,
+      cpu_pct: Math.round((n.used_cpu / n.total_cpu) * 100),
+      ram_pct: Math.round((n.used_ram / n.total_ram) * 100),
+    })),
+    log,
+    avg_latency_ms: parseFloat(avgLatency.toFixed(1)),
+    jobs_placed: assignments.length,
+    jobs_total: jobs.length,
+    balance_score: balance.std,
+    balance_pct: balance.pct,
+    duration_ms: 0,
+  };
 }
 
-const STRATEGIES = [
-  { id: "least-loaded", label: "Least-Loaded", color: "#5DCAA5", desc: "Always picks the most free node — great balance, ignores latency." },
-  { id: "binpack",      label: "Binpack",       color: "#7F77DD", desc: "Fills nodes before moving on — fewer active nodes, saves power." },
-  { id: "network-aware",label: "Network-Aware", color: "#378ADD", desc: "Scores nodes by CPU + latency — best for fast microservices." },
-];
+function makeDefaultJobs() {
+  return Array.from({ length: 12 }, (_, i) => ({
+    id: `job-${i + 1}`,
+    label: `Job ${i + 1}`,
+    cpu: [0.5, 1, 1.5, 2][i % 4],
+    ram: [1, 2, 1, 3][i % 4],
+  }));
+}
 
-function NodeBar({ node, highlight }) {
-  const cpuPct = Math.round((node.usedCPU / node.totalCPU) * 100);
-  const ramPct = Math.round((node.usedRAM / node.totalRAM) * 100);
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const C = {
+  bg:      "#07070f",
+  surface: "#0d0d1a",
+  card:    "#111124",
+  border:  "#1e1e3a",
+  borderHi:"#2d2d5e",
+  text:    "#e2e8f0",
+  muted:   "#64748b",
+  dim:     "#334155",
+  violet:  "#c084fc",
+  pink:    "#f472b6",
+  cyan:    "#38bdf8",
+  green:   "#4ade80",
+  red:     "#f87171",
+};
+
+const css = {
+  page: {
+    minHeight: "100vh",
+    background: C.bg,
+    color: C.text,
+    fontFamily: "'DM Mono', 'Fira Code', 'Cascadia Code', monospace",
+    padding: "0 0 60px",
+  },
+  hero: {
+    background: `linear-gradient(180deg, #0a0a1e 0%, ${C.bg} 100%)`,
+    borderBottom: `1px solid ${C.border}`,
+    padding: "40px 24px 32px",
+    textAlign: "center",
+    position: "relative",
+    overflow: "hidden",
+  },
+  container: { maxWidth: 860, margin: "0 auto", padding: "0 20px" },
+  card: {
+    background: C.card,
+    border: `1px solid ${C.border}`,
+    borderRadius: 12,
+    padding: "18px 20px",
+  },
+};
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function GlowOrb({ color, x, y, size = 300 }) {
   return (
     <div style={{
-      border: `1.5px solid ${highlight ? "#1D9E75" : "#e2e8f0"}`,
-      borderRadius: 12,
-      padding: "14px 16px",
-      background: highlight ? "#f0fdf8" : "#fff",
-      transition: "all 0.3s",
-      minWidth: 0,
+      position: "absolute", left: x, top: y, width: size, height: size,
+      borderRadius: "50%",
+      background: `radial-gradient(circle, ${color}18 0%, transparent 70%)`,
+      pointerEvents: "none",
+      transform: "translate(-50%, -50%)",
+    }} />
+  );
+}
+
+function Tag({ children, color = C.violet }) {
+  return (
+    <span style={{
+      fontSize: 10, fontWeight: 600, letterSpacing: "0.08em",
+      padding: "2px 8px", borderRadius: 4,
+      border: `1px solid ${color}55`,
+      color: color,
+      background: `${color}11`,
     }}>
-      <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10, color: "#1e293b" }}>{node.label}</div>
+      {children}
+    </span>
+  );
+}
 
-      <div style={{ marginBottom: 6 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-          <span>CPU</span><span>{node.usedCPU}/{node.totalCPU} cores</span>
-        </div>
-        <div style={{ background: "#e2e8f0", borderRadius: 99, height: 8, overflow: "hidden" }}>
-          <div style={{ width: `${cpuPct}%`, background: cpuPct > 80 ? "#E24B4A" : "#1D9E75", height: "100%", borderRadius: 99, transition: "width 0.5s" }} />
-        </div>
-      </div>
-
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "#64748b", marginBottom: 3 }}>
-          <span>RAM</span><span>{node.usedRAM}/{node.totalRAM} GB</span>
-        </div>
-        <div style={{ background: "#e2e8f0", borderRadius: 99, height: 8, overflow: "hidden" }}>
-          <div style={{ width: `${ramPct}%`, background: "#7F77DD", height: "100%", borderRadius: 99, transition: "width 0.5s" }} />
-        </div>
-      </div>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-        {node.jobs.map(jid => (
-          <span key={jid} style={{ fontSize: 11, background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 6px", color: "#475569" }}>
-            {jid}
-          </span>
-        ))}
-        {node.jobs.length === 0 && <span style={{ fontSize: 11, color: "#94a3b8" }}>idle</span>}
-      </div>
-
-      <div style={{ marginTop: 10, fontSize: 12, color: "#94a3b8" }}>Latency: {node.latency}ms</div>
+function Pill({ label, value, color }) {
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column", gap: 2,
+      background: C.surface, border: `1px solid ${C.border}`,
+      borderRadius: 8, padding: "10px 14px",
+    }}>
+      <span style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>{label}</span>
+      <span style={{ fontSize: 20, fontWeight: 700, color: color || C.text }}>{value}</span>
     </div>
   );
 }
 
+function Bar({ pct, color, animated = true }) {
+  return (
+    <div style={{
+      height: 6, borderRadius: 99,
+      background: `${C.border}`,
+      overflow: "hidden",
+    }}>
+      <div style={{
+        width: `${pct}%`, height: "100%", borderRadius: 99,
+        background: pct > 85 ? C.red : color,
+        transition: animated ? "width 0.6s cubic-bezier(0.4,0,0.2,1)" : "none",
+        boxShadow: `0 0 6px ${pct > 85 ? C.red : color}88`,
+      }} />
+    </div>
+  );
+}
+
+function NodeCard({ node, highlighted, accentColor }) {
+  const glow = highlighted ? `0 0 20px ${accentColor}44, 0 0 40px ${accentColor}22` : "none";
+  return (
+    <div style={{
+      ...css.card,
+      border: `1px solid ${highlighted ? accentColor : C.border}`,
+      boxShadow: glow,
+      transition: "all 0.35s cubic-bezier(0.4,0,0.2,1)",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <span style={{ fontWeight: 700, fontSize: 13, color: highlighted ? accentColor : C.text }}>{node.label}</span>
+        <Tag color={node.latency_ms <= 15 ? C.green : node.latency_ms <= 40 ? C.cyan : C.red}>
+          {node.latency_ms}ms
+        </Tag>
+      </div>
+
+      <div style={{ marginBottom: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginBottom: 4 }}>
+          <span>CPU</span>
+          <span style={{ color: C.text }}>{node.used_cpu?.toFixed(1)}/{node.total_cpu} cores · {node.cpu_pct || 0}%</span>
+        </div>
+        <Bar pct={node.cpu_pct || 0} color={accentColor || C.violet} />
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginBottom: 4 }}>
+          <span>RAM</span>
+          <span style={{ color: C.text }}>{node.used_ram?.toFixed(0)}/{node.total_ram} GB · {node.ram_pct || 0}%</span>
+        </div>
+        <Bar pct={node.ram_pct || 0} color={C.pink} />
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, minHeight: 24 }}>
+        {(node.jobs || []).map(jid => (
+          <span key={jid} style={{
+            fontSize: 10, padding: "2px 6px", borderRadius: 4,
+            background: `${accentColor || C.violet}1a`,
+            border: `1px solid ${accentColor || C.violet}44`,
+            color: accentColor || C.violet,
+          }}>{jid}</span>
+        ))}
+        {(!node.jobs || node.jobs.length === 0) && (
+          <span style={{ fontSize: 11, color: C.muted }}>idle</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StrategyCard({ s, selected, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      background: selected ? `${s.accent}12` : C.card,
+      border: `1.5px solid ${selected ? s.accent : C.border}`,
+      borderRadius: 10, padding: "14px 16px",
+      cursor: "pointer", textAlign: "left",
+      transition: "all 0.25s",
+      boxShadow: selected ? `0 0 20px ${s.glow}` : "none",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span style={{ fontSize: 18, color: s.accent }}>{s.icon}</span>
+        <span style={{ fontWeight: 700, fontSize: 13, color: selected ? s.accent : C.text }}>{s.label}</span>
+      </div>
+      <p style={{ fontSize: 11, color: C.muted, margin: "0 0 6px", lineHeight: 1.5 }}>{s.desc}</p>
+      <p style={{ fontSize: 11, color: selected ? s.accent : C.dim, margin: 0, fontStyle: "italic" }}>{s.tradeoff}</p>
+    </button>
+  );
+}
+
+function NeonButton({ onClick, disabled, children, color = C.violet, outline = false }) {
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      padding: "9px 20px", borderRadius: 8, cursor: disabled ? "not-allowed" : "pointer",
+      border: `1.5px solid ${disabled ? C.dim : color}`,
+      background: outline ? "transparent" : disabled ? C.surface : `${color}22`,
+      color: disabled ? C.muted : color,
+      fontFamily: "inherit", fontSize: 13, fontWeight: 600,
+      transition: "all 0.2s",
+      boxShadow: disabled ? "none" : `0 0 12px ${color}33`,
+      letterSpacing: "0.03em",
+    }}>
+      {children}
+    </button>
+  );
+}
+
+// ─── Job configurator ─────────────────────────────────────────────────────────
+function JobConfigurator({ jobs, onJobsChange }) {
+  const addJob = () => {
+    const id = `job-${jobs.length + 1}`;
+    onJobsChange([...jobs, { id, label: id, cpu: 1, ram: 2 }]);
+  };
+  const removeJob = (idx) => onJobsChange(jobs.filter((_, i) => i !== idx));
+  const update = (idx, field, val) => {
+    const updated = [...jobs];
+    updated[idx] = { ...updated[idx], [field]: parseFloat(val) || val };
+    onJobsChange(updated);
+  };
+
+  return (
+    <div style={{ ...css.card, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.violet }}>Job queue <span style={{ color: C.muted, fontWeight: 400 }}>({jobs.length} jobs)</span></span>
+        <NeonButton onClick={addJob} color={C.green} outline>+ Add job</NeonButton>
+      </div>
+      <div style={{ display: "grid", gap: 6, maxHeight: 240, overflowY: "auto" }}>
+        {jobs.map((job, i) => (
+          <div key={job.id} style={{
+            display: "grid", gridTemplateColumns: "1fr 80px 80px auto",
+            gap: 8, alignItems: "center",
+            padding: "8px 10px", borderRadius: 8,
+            background: C.surface, border: `1px solid ${C.border}`,
+          }}>
+            <span style={{ fontSize: 12, color: C.text }}>{job.label}</span>
+            <div>
+              <label style={{ fontSize: 10, color: C.muted, display: "block", marginBottom: 2 }}>CPU cores</label>
+              <input
+                type="number" min="0.5" max="8" step="0.5" value={job.cpu}
+                onChange={e => update(i, "cpu", e.target.value)}
+                style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.cyan, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }}
+              />
+            </div>
+            <div>
+              <label style={{ fontSize: 10, color: C.muted, display: "block", marginBottom: 2 }}>RAM GB</label>
+              <input
+                type="number" min="1" max="32" step="1" value={job.ram}
+                onChange={e => update(i, "ram", e.target.value)}
+                style={{ width: "100%", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, color: C.pink, padding: "3px 6px", fontSize: 12, fontFamily: "inherit" }}
+              />
+            </div>
+            <button onClick={() => removeJob(i)} style={{
+              background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16, padding: "0 4px",
+            }}>×</button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Benchmark section ────────────────────────────────────────────────────────
+function BenchmarkSection() {
+  return (
+    <div>
+      <div style={{ marginBottom: 16 }}>
+        <p style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, margin: 0 }}>
+          Real performance data collected from the AI job running inside Kubernetes — with and without CPU limits enforced by Linux cgroups. This is what actually happens when the OS scheduler gets throttled.
+        </p>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: "Unlimited", data: BENCHMARK.unlimited, color: C.green, tag: "No limits" },
+          { label: "1 core limit", data: BENCHMARK.limited_1000m, color: C.cyan, tag: "1000m CPU cap" },
+          { label: "500m limit", data: BENCHMARK.limited_500m, color: C.red, tag: "500m CPU cap" },
+        ].map(({ label, data, color, tag }) => (
+          <div key={label} style={{ ...css.card, border: `1px solid ${color}44` }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color }}>{label}</span>
+              <Tag color={color}>{tag}</Tag>
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <div>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>CPU usage</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color }}>{data.cores}m</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>Throughput (SVD/s)</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color }}>{data.throughput}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 3 }}>p99 Latency</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color }}>{data.latency}ms</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ ...css.card, border: `1px solid ${C.violet}44`, background: `${C.violet}08` }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.violet, marginBottom: 8 }}>Key insight</div>
+        <p style={{ fontSize: 13, color: C.muted, margin: 0, lineHeight: 1.7 }}>
+          Capping at <span style={{ color: C.red }}>500m CPU</span> via Kubernetes resource limits reduced throughput by{" "}
+          <span style={{ color: C.red }}>87.5%</span> and increased p99 latency by{" "}
+          <span style={{ color: C.red }}>8.8×</span>. This is Linux cgroups enforcing isolation — the same OS scheduling mechanism that makes Kubernetes safe for multi-tenant clusters.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
+  const [tab, setTab] = useState("sim");
   const [strategy, setStrategy] = useState("least-loaded");
+  const [jobs, setJobs] = useState(makeDefaultJobs());
+  const [showJobConfig, setShowJobConfig] = useState(false);
+
+  const [step, setStep]     = useState(0);
   const [running, setRunning] = useState(false);
-  const [step, setStep] = useState(0);
   const [result, setResult] = useState(null);
   const [compareData, setCompareData] = useState(null);
-  const [activeTab, setActiveTab] = useState("sim");
-  const intervalRef = useRef(null);
+  const [apiOnline, setApiOnline] = useState(false);
 
-  const fullResult = result || runScheduler(strategy);
-  const displayedAssignments = fullResult.assignments.slice(0, step);
-  const displayedNodes = initNodes().map(n => {
-    const copy = { ...n };
-    displayedAssignments.forEach(a => {
-      if (a.nodeId === n.id) {
-        const job = JOBS.find(j => j.id === a.jobId);
-        copy.usedCPU += job.cpu;
-        copy.usedRAM += job.ram;
-        copy.jobs = [...(copy.jobs || []), a.jobId];
-      }
-    });
-    return copy;
-  });
+  const timerRef = useRef(null);
+  const strat = STRATEGIES.find(s => s.id === strategy);
 
-  function runSim() {
-    const r = runScheduler(strategy);
+  // Check if API is reachable
+  useEffect(() => {
+    if (!API_BASE) return;
+    fetch(`${API_BASE}/health`).then(r => r.ok && setApiOnline(true)).catch(() => {});
+  }, []);
+
+  async function fetchSchedule(strat, jobList) {
+    if (API_BASE && apiOnline) {
+      const res = await fetch(`${API_BASE}/schedule`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy: strat, jobs: jobList }),
+      });
+      if (!res.ok) throw new Error("API error");
+      return res.json();
+    }
+    return runSchedulerLocal(strat, jobList, DEFAULT_NODES);
+  }
+
+  async function runSim() {
+    const r = await fetchSchedule(strategy, jobs);
     setResult(r);
     setStep(0);
     setRunning(true);
   }
 
   useEffect(() => {
-    if (!running) return;
-    if (step >= 12) { setRunning(false); return; }
-    intervalRef.current = setTimeout(() => setStep(s => s + 1), 220);
-    return () => clearTimeout(intervalRef.current);
-  }, [running, step]);
-
-  function compareAll() {
-    setCompareData(STRATEGIES.map(s => {
-      const r = runScheduler(s.id);
-      const nodeUtils = r.nodes.map(n => Math.round((n.usedCPU / n.totalCPU) * 100));
-      return {
-        ...s,
-        avgLatency: r.avgLatency.toFixed(1),
-        jobsPlaced: r.assignments.length,
-        nodeUtils,
-        balance: (r.balance * 100).toFixed(0),
-      };
-    }));
-    setActiveTab("compare");
-  }
+    if (!running || !result) return;
+    if (step >= result.assignments.length) { setRunning(false); return; }
+    timerRef.current = setTimeout(() => setStep(s => s + 1), 220);
+    return () => clearTimeout(timerRef.current);
+  }, [running, step, result]);
 
   function reset() {
-    clearTimeout(intervalRef.current);
+    clearTimeout(timerRef.current);
     setRunning(false);
     setStep(0);
     setResult(null);
   }
 
-  const lastAssigned = displayedAssignments.length > 0 ? displayedAssignments[displayedAssignments.length - 1] : null;
+  async function runCompare() {
+    const results = await Promise.all(
+      STRATEGIES.map(s => fetchSchedule(s.id, jobs))
+    );
+    setCompareData(results);
+  }
+
+  // Build displayed state from step
+  const fullResult = result || runSchedulerLocal(strategy, jobs, DEFAULT_NODES);
+  const shownAssignments = fullResult.assignments.slice(0, step);
+
+  const displayedNodes = DEFAULT_NODES.map(n => {
+    const copy = { ...n, used_cpu: 0, used_ram: 0, jobs: [] };
+    shownAssignments.forEach(a => {
+      if (a.node_id === n.id) {
+        const job = jobs.find(j => j.id === a.job_id);
+        if (job) { copy.used_cpu += job.cpu; copy.used_ram += job.ram; }
+        copy.jobs.push(a.job_id);
+      }
+    });
+    return {
+      ...copy,
+      cpu_pct: Math.round((copy.used_cpu / n.total_cpu) * 100),
+      ram_pct: Math.round((copy.used_ram / n.total_ram) * 100),
+    };
+  });
+
+  const lastAssigned = shownAssignments.at(-1);
+  const done = result && step >= result.assignments.length;
 
   return (
-    <div style={{ fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif", maxWidth: 760, margin: "0 auto", padding: "24px 16px", color: "#1e293b" }}>
+    <div style={css.page}>
+      {/* ── Hero ── */}
+      <header style={css.hero}>
+        <GlowOrb color={C.violet} x="20%" y="50%" size={400} />
+        <GlowOrb color={C.pink}   x="80%" y="50%" size={300} />
+        <GlowOrb color={C.cyan}   x="50%" y="100%" size={200} />
 
-      <div style={{ marginBottom: 24 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 4px", color: "#0f172a" }}>
-          Kubernetes Scheduling Simulator
-        </h1>
-        <p style={{ fontSize: 14, color: "#64748b", margin: 0 }}>
-          OS Case Study — 3 nodes, 12 jobs, 3 real scheduling strategies
-        </p>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: "1.5px solid #e2e8f0", paddingBottom: 12 }}>
-        {["sim", "compare", "about"].map(tab => (
-          <button key={tab} onClick={() => setActiveTab(tab)} style={{
-            padding: "6px 16px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 500,
-            background: activeTab === tab ? "#0f172a" : "transparent",
-            color: activeTab === tab ? "#fff" : "#64748b",
-            transition: "all 0.2s",
+        <div style={{ position: "relative", zIndex: 1 }}>
+          <div style={{ display: "flex", justifyContent: "center", gap: 8, marginBottom: 16 }}>
+            <Tag color={C.violet}>VIT VELLORE · OS CASE STUDY</Tag>
+            <Tag color={apiOnline ? C.green : C.muted}>{apiOnline ? "API ONLINE" : "OFFLINE MODE"}</Tag>
+          </div>
+          <h1 style={{
+            fontSize: "clamp(24px, 5vw, 42px)", fontWeight: 800,
+            margin: "0 0 10px",
+            background: `linear-gradient(135deg, ${C.violet} 0%, ${C.pink} 50%, ${C.cyan} 100%)`,
+            WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
+            letterSpacing: "-0.02em",
           }}>
-            {tab === "sim" ? "Simulator" : tab === "compare" ? "Compare all" : "How it works"}
-          </button>
-        ))}
+            Kubernetes Scheduling Simulator
+          </h1>
+          <p style={{ fontSize: 15, color: C.muted, margin: 0 }}>
+            3 nodes · {jobs.length} jobs · 3 real strategies · cgroup benchmarks
+          </p>
+        </div>
+      </header>
+
+      {/* ── Tabs ── */}
+      <div style={{ borderBottom: `1px solid ${C.border}`, background: C.surface }}>
+        <div style={{ ...css.container, display: "flex", gap: 0 }}>
+          {[
+            { id: "sim",       label: "Simulator" },
+            { id: "compare",   label: "Compare" },
+            { id: "benchmark", label: "K8s Benchmarks" },
+            { id: "about",     label: "How it works" },
+          ].map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              padding: "14px 20px", border: "none", background: "none",
+              cursor: "pointer", fontFamily: "inherit", fontSize: 13, fontWeight: 600,
+              color: tab === t.id ? strat.accent : C.muted,
+              borderBottom: `2px solid ${tab === t.id ? strat.accent : "transparent"}`,
+              transition: "all 0.2s",
+              letterSpacing: "0.02em",
+            }}>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {activeTab === "sim" && (
-        <div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 18 }}>
-            {STRATEGIES.map(s => (
-              <button key={s.id} onClick={() => { setStrategy(s.id); reset(); }} style={{
-                padding: "12px 10px", borderRadius: 10, cursor: "pointer",
-                border: `2px solid ${strategy === s.id ? s.color : "#e2e8f0"}`,
-                background: strategy === s.id ? `${s.color}18` : "#fff",
-                textAlign: "left", transition: "all 0.2s",
-              }}>
-                <div style={{ fontWeight: 600, fontSize: 13, color: strategy === s.id ? s.color : "#334155", marginBottom: 4 }}>{s.label}</div>
-                <div style={{ fontSize: 11, color: "#94a3b8", lineHeight: 1.4 }}>{s.desc}</div>
+      <div style={{ ...css.container, paddingTop: 28 }}>
+
+        {/* ══ SIMULATOR TAB ══ */}
+        {tab === "sim" && (
+          <div>
+            {/* Strategy selector */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}>
+              {STRATEGIES.map(s => (
+                <StrategyCard
+                  key={s.id} s={s}
+                  selected={strategy === s.id}
+                  onClick={() => { setStrategy(s.id); reset(); }}
+                />
+              ))}
+            </div>
+
+            {/* Job config toggle */}
+            <div style={{ marginBottom: 14 }}>
+              <button
+                onClick={() => setShowJobConfig(v => !v)}
+                style={{
+                  background: "none", border: `1px solid ${C.border}`, borderRadius: 8,
+                  color: C.muted, cursor: "pointer", fontSize: 12, padding: "6px 14px",
+                  fontFamily: "inherit",
+                }}>
+                {showJobConfig ? "▲ Hide" : "▼ Edit"} job queue ({jobs.length} jobs)
               </button>
-            ))}
-          </div>
+              <button
+                onClick={() => { setJobs(makeDefaultJobs()); reset(); }}
+                style={{
+                  background: "none", border: "none", color: C.dim,
+                  cursor: "pointer", fontSize: 12, padding: "6px 14px", fontFamily: "inherit",
+                }}>
+                Reset to defaults
+              </button>
+            </div>
 
-          <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-            <button onClick={runSim} disabled={running} style={{
-              padding: "9px 20px", borderRadius: 8, border: "none", cursor: running ? "not-allowed" : "pointer",
-              background: running ? "#94a3b8" : "#0f172a", color: "#fff", fontWeight: 600, fontSize: 13,
-            }}>
-              {running ? `Scheduling… (${step}/12)` : step === 12 ? "Run again" : "▶ Run simulation"}
-            </button>
-            <button onClick={reset} style={{
-              padding: "9px 16px", borderRadius: 8, border: "1.5px solid #e2e8f0", background: "#fff", cursor: "pointer", fontSize: 13, color: "#64748b",
-            }}>Reset</button>
-            <button onClick={compareAll} style={{
-              padding: "9px 16px", borderRadius: 8, border: "1.5px solid #e2e8f0", background: "#fff", cursor: "pointer", fontSize: 13, color: "#64748b", marginLeft: "auto",
-            }}>Compare all →</button>
-          </div>
+            {showJobConfig && <JobConfigurator jobs={jobs} onJobsChange={j => { setJobs(j); reset(); }} />}
 
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
-            {displayedNodes.map(n => (
-              <NodeBar key={n.id} node={n} highlight={lastAssigned?.nodeId === n.id} />
-            ))}
-          </div>
+            {/* Action buttons */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+              <NeonButton onClick={runSim} disabled={running} color={strat.accent}>
+                {running ? `Scheduling… ${step}/${result?.assignments.length || "?"}` : done ? "▶ Run again" : "▶ Run simulation"}
+              </NeonButton>
+              <NeonButton onClick={reset} color={C.muted} outline>Reset</NeonButton>
+              <NeonButton onClick={() => { runCompare(); setTab("compare"); }} color={C.pink} outline>
+                Compare all →
+              </NeonButton>
+            </div>
 
-          {step > 0 && (
-            <div style={{ background: "#f8fafc", borderRadius: 10, padding: "14px 16px", border: "1px solid #e2e8f0" }}>
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: "#475569" }}>Assignment log</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {fullResult.log.slice(0, step).map((l, i) => (
-                  <span key={i} style={{ fontSize: 12, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 8px", color: "#334155" }}>{l}</span>
-                ))}
-              </div>
-              {step === 12 && (
-                <div style={{ marginTop: 12, display: "flex", gap: 16 }}>
-                  <div style={{ fontSize: 13 }}>
-                    <span style={{ color: "#94a3b8" }}>Avg latency: </span>
-                    <strong>{fullResult.avgLatency.toFixed(1)}ms</strong>
-                  </div>
-                  <div style={{ fontSize: 13 }}>
-                    <span style={{ color: "#94a3b8" }}>Jobs placed: </span>
-                    <strong>{fullResult.assignments.length}/12</strong>
-                  </div>
+            {/* Node grid */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+              {displayedNodes.map(n => (
+                <NodeCard
+                  key={n.id} node={n}
+                  highlighted={lastAssigned?.node_id === n.id}
+                  accentColor={strat.accent}
+                />
+              ))}
+            </div>
+
+            {/* Log + metrics */}
+            {step > 0 && (
+              <div style={css.card}>
+                <div style={{ fontSize: 12, color: strat.accent, fontWeight: 700, marginBottom: 10, letterSpacing: "0.06em" }}>
+                  ASSIGNMENT LOG
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: done ? 16 : 0 }}>
+                  {fullResult.log.slice(0, step).map((l, i) => (
+                    <span key={i} style={{
+                      fontSize: 11, padding: "3px 8px", borderRadius: 4,
+                      background: C.surface, border: `1px solid ${C.border}`,
+                      color: i === step - 1 ? strat.accent : C.muted,
+                    }}>{l}</span>
+                  ))}
+                </div>
 
-      {activeTab === "compare" && (
-        <div>
-          {!compareData ? (
-            <div style={{ textAlign: "center", padding: "40px 0" }}>
-              <button onClick={compareAll} style={{
-                padding: "12px 28px", borderRadius: 10, border: "none", background: "#0f172a", color: "#fff", fontWeight: 600, fontSize: 14, cursor: "pointer",
-              }}>Run all 3 strategies & compare</button>
-            </div>
-          ) : (
-            <div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
-                {compareData.map(s => (
-                  <div key={s.id} style={{ border: `2px solid ${s.color}`, borderRadius: 12, padding: "16px 14px", background: `${s.color}08` }}>
-                    <div style={{ fontWeight: 700, fontSize: 14, color: s.color, marginBottom: 12 }}>{s.label}</div>
-                    <div style={{ fontSize: 13, marginBottom: 6 }}><span style={{ color: "#94a3b8" }}>Avg latency</span><br /><strong style={{ fontSize: 18 }}>{s.avgLatency}ms</strong></div>
-                    <div style={{ fontSize: 13, marginBottom: 6 }}><span style={{ color: "#94a3b8" }}>Jobs placed</span><br /><strong style={{ fontSize: 18 }}>{s.jobsPlaced}/12</strong></div>
-                    <div style={{ fontSize: 13, marginBottom: 10 }}><span style={{ color: "#94a3b8" }}>Balance score</span><br /><strong style={{ fontSize: 18 }}>{s.balance}%</strong></div>
-                    <div style={{ fontSize: 11, color: "#64748b", marginTop: 4 }}>Node utilisation</div>
-                    {s.nodeUtils.map((u, i) => (
-                      <div key={i} style={{ marginTop: 4 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94a3b8" }}>
-                          <span>{NODES[i].label}</span><span>{u}%</span>
-                        </div>
-                        <div style={{ background: "#e2e8f0", borderRadius: 99, height: 5, overflow: "hidden" }}>
-                          <div style={{ width: `${u}%`, background: s.color, height: "100%", borderRadius: 99 }} />
-                        </div>
-                      </div>
-                    ))}
+                {done && (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginTop: 16 }}>
+                    <Pill label="Avg Latency" value={`${fullResult.avg_latency_ms}ms`} color={strat.accent} />
+                    <Pill label="Jobs Placed" value={`${fullResult.jobs_placed}/${fullResult.jobs_total}`} color={C.green} />
+                    <Pill label="Balance" value={`${fullResult.balance_pct}%`} color={C.pink} />
+                    <Pill label="Std Dev" value={fullResult.balance_score} color={C.cyan} />
                   </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ COMPARE TAB ══ */}
+        {tab === "compare" && (
+          <div>
+            {!compareData ? (
+              <div style={{ textAlign: "center", padding: "60px 0" }}>
+                <p style={{ color: C.muted, marginBottom: 20, fontSize: 14 }}>
+                  Run all 3 strategies on the current job queue and compare results side-by-side.
+                </p>
+                <NeonButton onClick={runCompare} color={C.violet}>Run all 3 strategies</NeonButton>
+              </div>
+            ) : (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 20 }}>
+                  {compareData.map((r, i) => {
+                    const s = STRATEGIES[i];
+                    const bestLatency = compareData.reduce((best, x) => x.avg_latency_ms < best.avg_latency_ms ? x : best, compareData[0]);
+                    const bestBalance = compareData.reduce((best, x) => x.balance_pct > best.balance_pct ? x : best, compareData[0]);
+                    const isBestLatency = r.avg_latency_ms === bestLatency.avg_latency_ms;
+                    const isBestBalance = r.balance_pct === bestBalance.balance_pct;
+
+                    return (
+                      <div key={s.id} style={{
+                        ...css.card,
+                        border: `1.5px solid ${s.accent}`,
+                        boxShadow: `0 0 24px ${s.glow}`,
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+                          <span style={{ fontSize: 20 }}>{s.icon}</span>
+                          <span style={{ fontWeight: 700, fontSize: 14, color: s.accent }}>{s.label}</span>
+                        </div>
+
+                        <div style={{ display: "grid", gap: 8, marginBottom: 14 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontSize: 11, color: C.muted }}>Avg latency</span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              {isBestLatency && <Tag color={C.green}>BEST</Tag>}
+                              <span style={{ fontWeight: 700, color: isBestLatency ? C.green : C.text }}>{r.avg_latency_ms}ms</span>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontSize: 11, color: C.muted }}>Balance</span>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              {isBestBalance && <Tag color={C.green}>BEST</Tag>}
+                              <span style={{ fontWeight: 700, color: isBestBalance ? C.green : C.text }}>{r.balance_pct}%</span>
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}>
+                            <span style={{ fontSize: 11, color: C.muted }}>Jobs placed</span>
+                            <span style={{ fontWeight: 700 }}>{r.jobs_placed}/{r.jobs_total}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}>
+                            <span style={{ fontSize: 11, color: C.muted }}>Std dev utilization</span>
+                            <span style={{ fontWeight: 700, color: C.muted }}>{r.balance_score}</span>
+                          </div>
+                        </div>
+
+                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>Node CPU utilization</div>
+                        {r.nodes.map(n => (
+                          <div key={n.id} style={{ marginBottom: 6 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginBottom: 3 }}>
+                              <span>{n.label}</span><span>{n.cpu_pct}%</span>
+                            </div>
+                            <Bar pct={n.cpu_pct} color={s.accent} animated={false} />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ ...css.card, border: `1px solid ${C.violet}44`, background: `${C.violet}08` }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: C.violet, marginBottom: 8 }}>Key insight</div>
+                  <p style={{ fontSize: 13, color: C.muted, margin: 0, lineHeight: 1.7 }}>
+                    <span style={{ color: C.cyan }}>Network-Aware</span> achieves lowest latency by routing jobs to Node A (10ms).{" "}
+                    <span style={{ color: C.violet }}>Least-Loaded</span> achieves best balance (lowest std dev across nodes).{" "}
+                    <span style={{ color: C.pink }}>Binpack</span> concentrates load — fewest active nodes, useful for cost savings but creates risk of hotspots.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ BENCHMARK TAB ══ */}
+        {tab === "benchmark" && <BenchmarkSection />}
+
+        {/* ══ ABOUT TAB ══ */}
+        {tab === "about" && (
+          <div style={{ maxWidth: 640 }}>
+            <div style={{ ...css.card, marginBottom: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.violet, letterSpacing: "0.06em", marginBottom: 10 }}>WHAT THIS DEMONSTRATES</div>
+              <p style={{ fontSize: 14, color: C.muted, lineHeight: 1.7, margin: 0 }}>
+                A full-stack OS scheduling case study: a FastAPI backend exposes a <span style={{ color: C.cyan }}>/schedule</span> API that runs real scheduling logic server-side, a React frontend calls it and animates job placement, and real Kubernetes cgroup benchmark data shows what OS-level resource isolation actually does to performance.
+              </p>
+            </div>
+
+            {STRATEGIES.map(s => (
+              <div key={s.id} style={{ ...css.card, borderLeft: `3px solid ${s.accent}`, marginBottom: 10 }}>
+                <div style={{ display: "flex", align: "center", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 16 }}>{s.icon}</span>
+                  <span style={{ fontWeight: 700, color: s.accent }}>{s.label}</span>
+                </div>
+                <p style={{ fontSize: 13, color: C.muted, margin: "0 0 6px", lineHeight: 1.6 }}>{s.desc}</p>
+                <p style={{ fontSize: 12, color: s.accent, margin: 0, fontStyle: "italic" }}>{s.tradeoff}</p>
+              </div>
+            ))}
+
+            <div style={{ ...css.card, marginTop: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.cyan, letterSpacing: "0.06em", marginBottom: 10 }}>TECH STACK</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {["React + Vite", "FastAPI (Python)", "Railway/Render", "Kubernetes", "Docker", "Linux cgroups", "Vercel"].map(t => (
+                  <Tag key={t} color={C.cyan}>{t}</Tag>
                 ))}
               </div>
-              <div style={{ background: "#f0fdf8", borderRadius: 10, padding: "14px 16px", border: "1px solid #bbf7d0", fontSize: 13 }}>
-                <strong>Key insight:</strong> Network-Aware gives lowest latency (prefers Node A at 10ms). Binpack concentrates load on fewer nodes. Least-Loaded spreads evenly — best balance but ignores latency.
-              </div>
             </div>
-          )}
-        </div>
-      )}
+          </div>
+        )}
 
-      {activeTab === "about" && (
-        <div style={{ fontSize: 14, color: "#334155", lineHeight: 1.7 }}>
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>What this project demonstrates</div>
-            <p style={{ margin: 0 }}>This is a working scheduler simulator replicating Kubernetes-level pod placement decisions. It shows how different scheduling strategies affect latency, node utilisation, and resource balance — the same trade-offs Kubernetes makes in production.</p>
-          </div>
-          {[
-            { title: "Least-Loaded", color: "#5DCAA5", body: "Before placing each job, it checks how much CPU each node has free. Picks the most free one. Result: jobs spread evenly across all nodes. Excellent for balanced utilisation." },
-            { title: "Binpack", color: "#7F77DD", body: "Opposite logic — picks the most-used node that can still fit the job. Fills Node A before touching Node B. Result: fewer active nodes consuming power. Great for cost efficiency." },
-            { title: "Network-Aware", color: "#378ADD", body: "Each node gets a score: 0.6 × (free CPU) + 0.4 × (1/latency). Node A (10ms) gets a big latency bonus. Result: jobs prefer low-latency nodes even if slightly busier. Best for microservices." },
-          ].map(s => (
-            <div key={s.title} style={{ borderLeft: `3px solid ${s.color}`, paddingLeft: 14, marginBottom: 16 }}>
-              <div style={{ fontWeight: 600, color: s.color, marginBottom: 4 }}>{s.title}</div>
-              <p style={{ margin: 0 }}>{s.body}</p>
-            </div>
-          ))}
-          <div style={{ background: "#f8fafc", borderRadius: 10, padding: "12px 16px", border: "1px solid #e2e8f0", marginTop: 8, fontSize: 13 }}>
-            <strong>Tech stack:</strong> React + Vite · Deployable on Vercel (free) · Real scheduling logic — not AI-generated
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
